@@ -2,9 +2,13 @@ import paramiko
 import os
 import re
 import json
-import requests
 import time
 import threading
+
+import cc
+import hourly
+import daily
+import daypart
 
 with open("config.json", "r") as f:
     ssh_config = json.load(f).get("ssh", {})
@@ -23,7 +27,6 @@ def connect_ssh():
     global ssh_client, shell, ssh_connected
     ssh_client = paramiko.SSHClient()
     ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
     ssh_client.connect(
         ssh_config["hostname"],
         port=ssh_config["port"],
@@ -59,7 +62,7 @@ def get_config():
     transport.connect(username=ssh_config["username"], password=ssh_config["password"])
     sftp = paramiko.SFTPClient.from_transport(transport)
 
-    local_path = os.path.join("config.py")
+    local_path = "config.py"
     remote_path = "/usr/home/dgadmin/config/current/config.py"
     sftp.get(remote_path, local_path)
     print("i1DT - Config downloaded from i1.")
@@ -69,29 +72,27 @@ def get_config():
     with open(local_path, "r") as f:
         config_content = f.read()
 
-    pattern = r"wxdata\.setInterestList\('coopId','1',\[(.*?)\]\)"
-    matches = re.findall(pattern, config_content)
+    coop_pattern = r"wxdata\.setInterestList\('coopId','1',\[(.*?)\]\)"
+    coop_matches = re.findall(coop_pattern, config_content)
     locations = []
-
-    for match in matches:
+    for match in coop_matches:
         ids = [id.strip().replace("'", "").replace('"', '') for id in match.split(",") if id.strip()]
-        ids = [id for id in ids if not id.startswith("K") ]
-        ids = [id for id in ids if not id.startswith("W") ]
+        ids = [id for id in ids if not id.startswith(("K", "W"))]
         locations.extend(ids)
 
-    pattern_tecci = r"wxdata\.setInterestList\('obsStation','1',\[(.*?)\]\)"
-    matches_tecci = re.findall(pattern_tecci, config_content)
+    tecci_pattern = r"wxdata\.setInterestList\('obsStation','1',\[(.*?)\]\)"
+    tecci_matches = re.findall(tecci_pattern, config_content)
     locations_tecci = []
-
-    for match in matches_tecci:
+    for match in tecci_matches:
         ids = [id.strip().replace("'", "").replace('"', '') for id in match.split(",") if id.strip()]
-        ids = [id for id in ids if not id.startswith("K") ]
-        ids = [id for id in ids if not id.startswith("W") ]
+        ids = [id for id in ids if not id.startswith(("K", "W"))]
         locations_tecci.extend(ids)
 
-    unique_locations = list(set(locations))
-    unique_locations_tecci = list(set(locations_tecci))
-    config_data = {"ssh": ssh_config, "coop": {"locations": unique_locations},"tecci": {"locations": unique_locations_tecci}}
+    config_data = {
+        "ssh": ssh_config,
+        "coop": {"locations": list(set(locations))},
+        "tecci": {"locations": list(set(locations_tecci))}
+    }
 
     with open("config.json", "w") as f:
         json.dump(config_data, f, indent=2)
@@ -100,38 +101,26 @@ def get_config():
     return config_data
 
 
-def get_data(record, locations):
+def upload_and_run_temp_files():
     ensure_temp_dir()
-    try:
-        url = f"https://wist.minnwx.com/api/i1/{record}/{','.join(locations)}?apiKey=5da46bbb68c49e48e05dc3362ea65adf"
-        response = requests.get(url)
-        local_file = os.path.join("temp", f"{record}.py")
-        with open(local_file, "w") as f:
-            f.write(response.text)
-        print(f"i1DT - {record} data downloaded.")
+    transport = paramiko.Transport((ssh_config["hostname"], ssh_config["port"]))
+    transport.connect(username=ssh_config["username"], password=ssh_config["password"])
+    sftp = paramiko.SFTPClient.from_transport(transport)
 
-        transport = paramiko.Transport((ssh_config["hostname"], ssh_config["port"]))
-        transport.connect(username=ssh_config["username"], password=ssh_config["password"])
-        sftp = paramiko.SFTPClient.from_transport(transport)
-
-        remote_path = f"/home/dgadmin/{record}.py"
-        sftp.put(local_file, remote_path)
-        print(f"i1DT - {record}.py uploaded.")
-        sftp.close()
-        transport.close()
+    for file_name in os.listdir("temp"):
+        local_path = os.path.join("temp", file_name)
+        remote_path = f"/home/dgadmin/{file_name}"
+        sftp.put(local_path, remote_path)
+        print(f"i1DT - Uploaded {file_name}")
 
         if not ssh_connected:
             connect_ssh()
 
-        time.sleep(1)
-        send_command("su -l dgadmin")
         time.sleep(0.5)
-        send_command("source ~/.bash_profile")
-        time.sleep(0.5)
-        send_command(f"runomni /twc/util/loadSCMTconfig.pyc /home/dgadmin/{record}.py")
+        send_command(f"runomni /twc/util/loadSCMTconfig.pyc {remote_path}")
 
-    except Exception as e:
-        print(f"i1DT - Error processing {record}: {e}")
+    sftp.close()
+    transport.close()
 
 
 def start_schedules():
@@ -140,25 +129,26 @@ def start_schedules():
         print("i1DT - Failed to load i1 config.")
         return
 
-    locations = config["coop"]["locations"]
-    locationsCC = config["tecci"]["locations"]
-
     def run_cc():
         while True:
-            get_data("cc", locationsCC)
+            ensure_temp_dir()
+            cc.main()
+            upload_and_run_temp_files()
             time.sleep(600)
 
-    def run_hourly_daily():
+    def run_hourly_daily_daypart():
         while True:
-            get_data("hourly", locations)
-            get_data("daily", locations)
-            get_data("daypart", locations)
+            ensure_temp_dir()
+            hourly.main()
+            daily.main()
+            daypart.main()
+            upload_and_run_temp_files()
             time.sleep(1800)
 
     threading.Thread(target=run_cc, daemon=True).start()
-    threading.Thread(target=run_hourly_daily, daemon=True).start()
+    threading.Thread(target=run_hourly_daily_daypart, daemon=True).start()
 
-    print("i1DT - Data fetch schedule started.")
+    print("i1DT - Data generation & upload schedules started.")
 
 
 if __name__ == "__main__":
