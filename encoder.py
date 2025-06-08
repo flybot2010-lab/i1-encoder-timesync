@@ -4,6 +4,7 @@ import re
 import json
 import time
 import threading
+from datetime import datetime, timedelta
 
 import cc
 import hourly
@@ -55,6 +56,11 @@ def send_command(command):
     print(f"i1DT - Sent command: {command}")
     shell.send(command + "\n")
 
+def sync_time():
+    now = datetime.now()
+    freebsd_timestamp = now.strftime("%m%d%H%M%Y.%S") # Generate current FreeBSD timestamp
+    print("i1DT - Syncing Time, Timestamp is:" + freebsd_timestamp)
+    send_command("date " + freebsd_timestamp) # Sync the time of the VM
 
 def get_config():
     ensure_temp_dir()
@@ -152,6 +158,7 @@ def start_schedules():
 
 
 if __name__ == "__main__":
+    sync_time()
     start_schedules()
     while True:
         time.sleep(1)
