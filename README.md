@@ -1,5 +1,7 @@
 # i1 Data Encoder
 
+A all-locally hosted version is in development and will be released soon.
+
 This encoder was made by Dalk with help from April (mewtek).
 
 Included are both a nodejs and python3 version, made to run on any device on the same network as I1.
